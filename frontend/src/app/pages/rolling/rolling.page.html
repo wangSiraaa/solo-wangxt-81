@@ -1,0 +1,176 @@
+<div style="padding:16px 20px; max-width:1500px; margin:0 auto">
+  <div class="row" style="align-items:center; justify-content:space-between; margin-bottom:12px">
+    <h1>滚动供水计划
+      <span class="muted small" style="font-weight:400">已执行前缀固定 · 承诺合同代价 · 预测分版本 · 调整归因</span>
+    </h1>
+    <span class="disclaimer">⚠ 教学演示：不连接真实闸门，不替代现实供水决策</span>
+  </div>
+
+  <div class="row" style="margin-bottom:12px">
+    <div class="panel grow">
+      <h2>场景</h2>
+      <select [value]="scenarioId()" (change)="load($any($event.target).value)" style="min-width:260px">
+        <option *ngFor="let s of scenarios()" [value]="s.id">
+          {{ s.name }}{{ s.builtin ? '（内置）' : '' }}
+        </option>
+      </select>
+      <div class="small muted" style="margin-top:8px">
+        当前已确认版本：
+        <span class="tag ok" *ngIf="confirmed()">🔒 {{ confirmed()!.forecast_version }}
+          （基于 {{ confirmed()!.actual_used_count }} 条实际流量）</span>
+        <span class="tag warn" *ngIf="!confirmed()">尚无确认计划——首次重算将以基线最优计划作为承诺来源</span>
+      </div>
+    </div>
+
+    <div class="panel grow">
+      <h2>滚动参数</h2>
+      <div class="row" style="align-items:center">
+        <label>已执行天数 m
+          <input type="number" min="1" max="10" style="width:60px" [ngModel]="m()"
+                 (ngModelChange)="setM(+$event)"></label>
+        <label>新预测版本号
+          <input style="width:90px" [ngModel]="version()" (ngModelChange)="bumpVersion($event)"></label>
+        <label>通知期(天)
+          <input type="number" min="0" style="width:60px"
+                 [ngModel]="contract().notice_steps"
+                 (ngModelChange)="setNotice(+$event)"></label>
+        <label>欠诺代价倍数
+          <input type="number" min="0" step="1" style="width:70px"
+                 [ngModel]="contract().down_cost_multiplier"
+                 (ngModelChange)="setMult(+$event)"></label>
+        <label class="small"><input type="checkbox" [ngModel]="contract().emergency"
+          (ngModelChange)="setEmergency($event)">
+          紧急豁免（可击穿最低保证，代价照计）</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="row" style="margin-bottom:12px">
+    <div class="panel grow">
+      <h2>① 预测修订（未来 {{ n() - m() }} 天来水倍数）</h2>
+      <div class="row" style="align-items:center">
+        <input type="range" min="0.1" max="1.6" step="0.05" style="flex:1"
+               [ngModel]="forecastScale()" (ngModelChange)="forecastScale.set(+$event)">
+        <b style="width:70px">{{ forecastScale() | number:'1.2-2' }}×</b>
+        <button (click)="scenarioPlunge()">骤降 0.25×</button>
+        <label class="small"><input type="checkbox" [ngModel]="evalWetDry()"
+          (ngModelChange)="evalWetDry.set($event)"> 同时评估偏丰/偏枯区间</label>
+      </div>
+    </div>
+    <div class="panel grow">
+      <h2>② 执行情况（前 {{ m() }} 天，实际值）</h2>
+      <div class="row" style="align-items:center">
+        <button (click)="scenarioOverUse()">实际取水超计划 +25%</button>
+        <button (click)="scenarioCurve()">③ 库容曲线修订 +8%</button>
+        <label class="small"><input type="checkbox" [ngModel]="reviseCurve()"
+          (ngModelChange)="reviseCurve.set($event)"> 应用曲线修订</label>
+      </div>
+    </div>
+  </div>
+
+  <!-- 逐日实际执行表 -->
+  <div class="panel" style="margin-bottom:12px">
+    <h2>前 {{ m() }} 天实际执行（1.00 = 与已确认计划一致；改这些数模拟执行偏差）</h2>
+    <table>
+      <thead><tr><th>日</th><th>实际入流倍数</th><th>实际供水倍数（各户）</th><th>实测库容调整(万m³)</th></tr></thead>
+      <tbody>
+      <tr *ngFor="let r of rows(); let i = index">
+        <td class="label">D{{ i + 1 }}</td>
+        <td><input type="number" step="0.05" style="width:90px"
+                   [(ngModel)]="rows()[i].inflow_scale"></td>
+        <td><input type="number" step="0.05" style="width:90px"
+                   [(ngModel)]="rows()[i].delivery_scale"></td>
+        <td><input type="number" step="10" placeholder="账面=实测" style="width:130px"
+                   [(ngModel)]="rows()[i].measured_delta_wan"></td>
+      </tr>
+      </tbody>
+    </table>
+    <div style="margin-top:10px">
+      <button class="primary" (click)="replan()" [disabled]="busy()">
+        {{ busy() ? '重算中…' : '滚动重算（不改写前 ' + m() + ' 天）' }}</button>
+      <button (click)="confirm()" [disabled]="!result()">确认此计划（绑定当前版本）</button>
+    </div>
+  </div>
+
+  <div class="warn-box" *ngIf="error()">⚠ {{ error() }}</div>
+  <div class="warn-box" *ngIf="warn()" style="border-color:var(--warn);background:rgba(242,177,52,.08)">
+    确认前检查：{{ warn() }}</div>
+
+  <ng-container *ngIf="result() as r">
+    <!-- 账面调整 -->
+    <div class="panel" *ngIf="r.reconciliations.length" style="margin-bottom:12px">
+      <h2>起点账面调整（历史账目保留，差额一次性入账）</h2>
+      <table>
+        <thead><tr><th>位置</th><th>账面/旧曲线(万m³)</th><th>实测/新曲线(万m³)</th>
+          <th>调整(万m³)</th><th>原因</th></tr></thead>
+        <tbody>
+        <tr *ngFor="let x of r.reconciliations">
+          <td class="label">{{ x.period }}</td>
+          <td>{{ fmtWan(x.book_storage_m3) }}</td>
+          <td>{{ fmtWan(x.measured_storage_m3) }}</td>
+          <td [style.color]="x.adjustment_m3 >= 0 ? 'var(--ok)' : 'var(--bad)'">
+            {{ fmtWan(x.adjustment_m3) }}</td>
+          <td class="label muted small">{{ x.reason }}</td>
+        </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 调整归因 -->
+    <div class="panel" style="margin-bottom:12px">
+      <h2>计划为什么变了？（未来供水调整归因，万m³）</h2>
+      <table>
+        <thead><tr><th>用户</th><th>总变化</th><th>预测改变</th><th>执行偏差(起点)</th>
+          <th>曲线修订</th><th>未解释残差</th><th>前缀实际-计划供水</th></tr></thead>
+        <tbody>
+        <tr *ngFor="let k of keys()">
+          <td class="label">{{ r.plan.demand_names[k] }}</td>
+          <td>{{ fmtWan(r.attribution.total_change_m3[k]) }}</td>
+          <td [style.color]="r.attribution.due_to_forecast_m3[k] ? 'var(--accent)' : ''">
+            {{ fmtWan(r.attribution.due_to_forecast_m3[k]) }}</td>
+          <td [style.color]="r.attribution.due_to_execution_m3[k] ? 'var(--warn)' : ''">
+            {{ fmtWan(r.attribution.due_to_execution_m3[k]) }}</td>
+          <td [style.color]="r.attribution.due_to_curve_m3[k] ? '#c2703a' : ''">
+            {{ fmtWan(r.attribution.due_to_curve_m3[k]) }}</td>
+          <td class="muted">{{ fmtWan(r.attribution.unexplained_m3[k]) }}</td>
+          <td>{{ fmtWan(r.attribution.actual_execution_gap_m3[k]) }}</td>
+        </tr>
+        </tbody>
+      </table>
+      <div class="small muted" style="margin-top:6px">
+        当前库容较原始期初变化 {{ fmtWan(r.attribution.current_storage_gap_m3) }} 万m³
+        （执行 {{ fmtWan(r.attribution.current_storage_gap_due_to_execution_m3) }}，
+        曲线重估 {{ fmtWan(r.attribution.current_storage_gap_due_to_revaluation_m3) }}）；
+        承诺改变代价 <b class="warn">{{ r.plan.totals['commitment_change_cost'] | number:'1.0-0' }}</b>
+        （归一化权重口径的违约成本，单独列示，不与供水量混算）；
+        基于确认版本 {{ r.based_on_confirmed_version || '（基线）' }} → 新版本 {{ r.forecast_version }}。
+      </div>
+    </div>
+
+    <!-- 情景区间 -->
+    <div class="panel" *ngIf="r.ranges.length" style="margin-bottom:12px">
+      <h2>同一方案在不同来水情景下的缺口区间</h2>
+      <table>
+        <thead><tr><th>情景</th><th>概率</th><th>可行</th>
+          <th *ngFor="let k of keys()">{{ r.plan.demand_names[k] }}缺口(万m³)</th>
+          <th>欠诺改变代价</th><th>期末蓄水(万m³)</th></tr></thead>
+        <tbody>
+        <tr *ngFor="let s of r.ranges">
+          <td class="label">{{ s.name }}</td>
+          <td>{{ s.probability === null ? '未给' : (s.probability | number:'0.0-2') }}</td>
+          <td><span class="tag" [class.ok]="s.feasible" [class.bad]="!s.feasible">
+            {{ s.feasible ? '可行' : '冲突' }}</span></td>
+          <td *ngFor="let k of keys()">{{ fmtWan(s.deficit_total_m3[k]) }}</td>
+          <td>{{ s.change_cost_total | number:'1.0-0' }}</td>
+          <td>{{ fmtWan(s.final_storage_m3) }}</td>
+        </tr>
+        </tbody>
+      </table>
+      <div class="small muted" style="margin-top:6px" *ngIf="r.probability_note">
+        ⚠ {{ r.probability_note }}</div>
+    </div>
+
+    <app-results-panel [result]="r.plan" [selected]="selectedPeriod()"
+                       (pick)="pickPeriod($event)" />
+  </ng-container>
+</div>

@@ -70,6 +70,9 @@
           (click)="pick.emit(row.index)" style="cursor:pointer">
         <td class="label">
           {{ row.label || '#' + (row.index + 1) }}
+          <span class="tag" style="background:rgba(150,150,160,.25);color:#cfd8e3"
+                *ngIf="row.fixed" title="已实际执行，重算不会改写">已执行</span>
+          <span class="tag warn" *ngIf="row.notice_locked" title="通知期内承诺，硬固定">承诺锁定</span>
           <span class="tag warn" *ngIf="row.inflow_imputed">插补</span>
           <span class="tag bad" *ngIf="conflictAt(row.index)" [title]="conflictAt(row.index)?.message">冲突</span>
         </td>

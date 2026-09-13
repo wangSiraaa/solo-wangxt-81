@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 
-from . import demos
+from . import demos, rolling
 from .core.units import UnitError, supported
-from .db import SchemeRow, ScenarioRow, init_db, session
+from .db import (PlanConfirmationRow, SchemeRow, ScenarioRow, init_db,
+                 session)
+from .rolling_schemas import ConfirmOut, ConfirmRequest, ReplanOut, ReplanRequest
 from .schemas import (CompareOut, LockOut, ScenarioIn, ScenarioMeta,
                       ScenarioOut, SolveOptions, SolveOut)
 from .services import ScenarioError, new_id, run_scenario
@@ -194,6 +197,83 @@ async def compare(sid: str, options_list: list[SolveOptions]):
         for i, opts in enumerate(options_list):
             results.append(run_scenario(scn, opts, scenario_id=sid, name=opts.name or f"方案{i+1}"))
         return CompareOut(scenario_id=sid, schemes=results)
+
+
+# ---------- 滚动计划 ----------
+
+@app.post("/api/rolling/replan", response_model=ReplanOut)
+async def rolling_replan(req: ReplanRequest):
+    """滚动重算：已执行前缀固定、承诺按合同规则调整并计改变代价；
+    可选多来水情景的缺口区间（无概率不输出概率）。"""
+    scn = _parse_scenario(req.scenario)
+    try:
+        return rolling.replan(req, scn)
+    except ScenarioError as e:
+        raise HTTPException(422, detail={"message": str(e)})
+    except UnitError as e:
+        raise HTTPException(422, detail={"message": f"单位错误：{e}"})
+
+
+@app.get("/api/scenarios/{sid}/confirmation")
+async def get_confirmation(sid: str):
+    async with session() as s:
+        row = (await s.execute(
+            select(PlanConfirmationRow)
+            .where(PlanConfirmationRow.scenario_id == sid,
+                   PlanConfirmationRow.active == "1")
+            .order_by(PlanConfirmationRow.created_at.desc())
+        )).scalars().first()
+        if row is None:
+            return None
+        return {
+            "id": row.id, "scenario_id": row.scenario_id,
+            "forecast_version": row.forecast_version,
+            "actual_used_count": int(row.actual_used_count or 0),
+            "contract": json.loads(row.contract or "{}"),
+            "result": json.loads(row.plan),
+            "created_at": row.created_at,
+        }
+
+
+@app.post("/api/scenarios/{sid}/confirm", response_model=ConfirmOut)
+async def confirm_plan(sid: str, req: ConfirmRequest):
+    """确认计划（与预测版本绑定）。确认前再次核对实际流量条数：
+    若库里已存在比确认依据更新的实际数据，则拒绝并提示先重算。"""
+    if req.scenario_id != sid:
+        raise HTTPException(422, "路径 scenario_id 与请求体不一致")
+    async with session() as s:
+        scn_row = await s.get(ScenarioRow, sid)
+        if scn_row is None:
+            raise HTTPException(404, "场景不存在")
+        # 确认前检查是否已有更新的实际流量：以活跃确认记录的条数为参照
+        prev = (await s.execute(
+            select(PlanConfirmationRow)
+            .where(PlanConfirmationRow.scenario_id == sid,
+                   PlanConfirmationRow.active == "1")
+        )).scalars().first()
+        newer = False
+        warning = ""
+        if prev and req.actual_used_count < int(prev.actual_used_count or 0):
+            newer = True
+            warning = (f"检测到已有 {prev.actual_used_count} 条实际流量的确认，"
+                       f"本次只基于 {req.actual_used_count} 条——请确认没有漏掉新的实际流量后再确认。")
+        # 同场景旧确认置为非活跃（历史版本保留）
+        await s.execute(
+            update(PlanConfirmationRow)
+            .where(PlanConfirmationRow.scenario_id == sid,
+                   PlanConfirmationRow.active == "1")
+            .values(active="0"))
+        cid = new_id()
+        s.add(PlanConfirmationRow(
+            id=cid, scenario_id=sid, forecast_version=req.forecast_version,
+            actual_used_count=str(req.actual_used_count),
+            contract=json.dumps(req.contract, ensure_ascii=False),
+            plan=json.dumps(req.plan, ensure_ascii=False),
+            created_at=datetime.now(timezone.utc).isoformat(), active="1"))
+        return ConfirmOut(confirmation_id=cid, scenario_id=sid,
+                          forecast_version=req.forecast_version,
+                          actual_used_count=req.actual_used_count,
+                          newer_actual_available=newer, warning=warning)
 
 
 # ---------- 生产态：直接托管构建后的 Angular（开发态用 ng serve + 代理）----------

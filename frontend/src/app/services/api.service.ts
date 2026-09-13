@@ -1,7 +1,7 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, inject } from '@angular/core';
 import { Observable } from 'rxjs';
-import { ScenarioMeta, ScenarioPayload, SchemeSummary, SolveOptions, SolveResult } from '../models';
+import { Confirmation, ReplanRequestModel, ReplanResult, ScenarioMeta, ScenarioPayload, SchemeSummary, SolveOptions, SolveResult } from '../models';
 
 @Injectable({ providedIn: 'root' })
 export class ApiService {
@@ -59,5 +59,21 @@ export class ApiService {
   compare(scenarioId: string, options: SolveOptions[]) {
     return this.http.post<{ scenario_id: string; schemes: SolveResult[] }>(
       `${this.base}/scenarios/${scenarioId}/compare`, options);
+  }
+
+  replan(body: ReplanRequestModel) {
+    return this.http.post<ReplanResult>(`${this.base}/rolling/replan`, body);
+  }
+
+  confirmation(scenarioId: string) {
+    return this.http.get<Confirmation | null>(`${this.base}/scenarios/${scenarioId}/confirmation`);
+  }
+
+  confirm(scenarioId: string, body: { scenario_id: string; forecast_version: string;
+                                     plan: SolveResult; actual_used_count: number;
+                                     contract: unknown }) {
+    return this.http.post<{ confirmation_id: string; newer_actual_available: boolean;
+                            warning: string }>(
+      `${this.base}/scenarios/${scenarioId}/confirm`, body);
   }
 }

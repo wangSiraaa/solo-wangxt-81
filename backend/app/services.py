@@ -145,10 +145,13 @@ def normalize(scn: ScenarioIn, opts: SolveOptions | None = None):
 
 # ---------- 求解与水量账 ----------
 
-def _ledger(scn: ScenarioIn, curve: StorageCurve, meta: dict, res: SolveResult):
+def _ledger(scn: ScenarioIn, curve: StorageCurve, meta: dict, res: SolveResult,
+            *, prefix_len: int = 0, notice_steps: int = 0):
     rows = []
     keys = [d.key for d in scn.demands]
     n = len(scn.steps)
+    commit = res.commitment_m3 or {}
+    short = res.shortfall_m3 or {}
     for t in range(n):
         deliver = {k: res.delivery_m3[k][t] for k in keys}
         demand = {k: res.demand_m3[k][t] for k in keys}
@@ -165,15 +168,21 @@ def _ledger(scn: ScenarioIn, curve: StorageCurve, meta: dict, res: SolveResult):
             "delivery_total_m3": sum(deliver.values()),
             "spill_m3": res.spill_m3[t],
             "end_storage_m3": res.storage_m3[t + 1],
-            "end_elevation_m": curve.elevation(res.storage_m3[t + 1]),
+            "end_elevation_m": curve.elevation(
+                min(max(res.storage_m3[t + 1], curve.dead_storage_m3), curve.max_storage_m3)),
             "demand_m3": demand,
             "deficit_m3": deficit,
             "eco_requirement_m3": res.eco_requirement_m3[t],
             "eco_release_m3": res.eco_release_m3[t],
             "eco_ok": res.eco_release_m3[t] + 1e-5 >= res.eco_requirement_m3[t],
             "conservation_residual_m3": res.conservation_residual_m3[t],
+            "fixed": t < prefix_len,
+            "notice_locked": prefix_len <= t < prefix_len + notice_steps,
+            "commitment_m3": {k: (commit.get(k) or [0.0] * n)[t] for k in keys},
+            "shortfall_m3": {k: (short.get(k) or [0.0] * n)[t] for k in keys},
         })
-    levels = [curve.elevation(s) for s in res.storage_m3]
+    levels = [curve.elevation(min(max(s, curve.dead_storage_m3), curve.max_storage_m3))
+              for s in res.storage_m3]
     return rows, levels
 
 

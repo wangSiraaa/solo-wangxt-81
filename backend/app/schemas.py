@@ -109,6 +109,10 @@ class LedgerRow(BaseModel):
     eco_release_m3: float
     eco_ok: bool
     conservation_residual_m3: float
+    fixed: bool = False                  # 已实际执行，优化器无权改写
+    notice_locked: bool = False          # 通知期内承诺，硬固定
+    commitment_m3: dict[str, float] = {}
+    shortfall_m3: dict[str, float] = {}
 
 
 class SolveOut(BaseModel):

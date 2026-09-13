@@ -46,13 +46,20 @@ def diagnose(curve: StorageCurve, inflow_m3, net_evap_depth_m, eco_m3,
              demand_amounts: dict[str, list[float]], weights: dict[str, float],
              *, initial_storage_m3: float,
              spillway_capacity_m3: float | None = None,
-             final_storage_m3: float | None = None) -> Diagnostic:
+             final_storage_m3: float | None = None,
+             lower_m3: dict[str, list[float]] | None = None,
+             notice_steps: int = 0,
+             commitment_m3: dict[str, list[float]] | None = None) -> Diagnostic:
     n = len(inflow_m3)
     keys = list(demand_amounts.keys())
     inflow = np.asarray(inflow_m3, dtype=float)
     depth = np.asarray(net_evap_depth_m, dtype=float)
     eco = np.maximum(np.asarray(eco_m3, dtype=float), 0.0)
     demands = {k: np.maximum(np.asarray(v, dtype=float), 0.0) for k, v in demand_amounts.items()}
+    floors = {k: np.maximum(np.asarray((lower_m3 or {}).get(k, [0.0] * n), dtype=float), 0.0)
+              for k in keys}
+    commits = {k: np.maximum(np.asarray((commitment_m3 or {}).get(k, [0.0] * n), dtype=float), 0.0)
+               for k in keys}
     w = np.array([weights[k] for k in keys], dtype=float)
     cap = np.inf if spillway_capacity_m3 is None else float(spillway_capacity_m3)
 
@@ -73,16 +80,35 @@ def diagnose(curve: StorageCurve, inflow_m3, net_evap_depth_m, eco_m3,
             evap = depth[t] * area
             available = v[t] + inflow[t] - evap
 
-            # 1) 生态底线：优先把生态流量以"供水(算入各类需求)或弃水"放出
-            remaining_demand = {k: demands[k][t] for k in keys}
+            # 硬下限（最低保证 + 通知期内不可更改的承诺）先放
+            required = {k: (commits[k][t] if t < notice_steps and commits[k][t] > 0
+                            else floors[k][t]) for k in keys}
             released = 0.0
+            for k in keys:
+                required[k] = min(required[k], demands[k][t])
+                delivery[k][t] = required[k]
+                released += required[k]
 
-            # 2) 按权重贪心供水（每方水的边际收益=w_j，先满足高权重）
+            # 剩余水量按权重贪心加给各类用户（上限=需求量）
             order = sorted(range(len(keys)), key=lambda j: -w[j])
             for j in order:
-                give = min(remaining_demand[keys[j]], max(0.0, available - released))
-                delivery[keys[j]][t] = give
+                k = keys[j]
+                room_demand = demands[k][t] - delivery[k][t]
+                give = min(room_demand, max(0.0, available - released))
+                delivery[k][t] += give
                 released += give
+
+            # 硬下限本身已击穿：单独记一条承诺/保证冲突
+            if released > available + 1e-6:
+                gap = released - available
+                conflicts.append(Conflict(
+                    index=t, kind="commitment",
+                    message=(f"时段 {t}：即便击穿死库容，硬承诺/最低保证仍缺水 "
+                             f"{gap:,.0f} m³（通知期承诺 {sum(commits[k][t] for k in keys):,.0f} "
+                             f"m³ 无法兑现）"),
+                    storage_balance_m3=float(available - released),
+                    storage_bound_m3=curve.dead_storage_m3, gap_m3=float(gap),
+                ))
 
             # 生态不足部分由弃水补足（弃水本身也在下游生态口径内）
             eco_extra = max(0.0, eco[t] - released)

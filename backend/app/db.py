@@ -36,6 +36,19 @@ class SchemeRow(Base):
     locked = Column(String, default="0")            # 锁定后参数不可改，只能克隆
 
 
+class PlanConfirmationRow(Base):
+    """已确认的滚动计划：与预测版本绑定；下次重算的承诺 C 取自此快照。"""
+    __tablename__ = "plan_confirmations"
+    id = Column(String, primary_key=True)
+    scenario_id = Column(String, nullable=False, index=True)
+    forecast_version = Column(String, nullable=False)
+    actual_used_count = Column(String, default="0")  # 确认时实际流量条数
+    contract = Column(Text, default="{}")
+    plan = Column(Text, nullable=False)              # 确认时的 SolveOut JSON
+    created_at = Column(String, default="")
+    active = Column(String, default="1")             # 每个场景仅一条 active
+
+
 engine = create_async_engine(DB_URL, echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
