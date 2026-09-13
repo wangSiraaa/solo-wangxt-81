@@ -47,6 +47,21 @@ class PlanConfirmationRow(Base):
     plan = Column(Text, nullable=False)              # 确认时的 SolveOut JSON
     created_at = Column(String, default="")
     active = Column(String, default="1")             # 每个场景仅一条 active
+    forced = Column(String, default="0")             # 是否在告警下强制确认
+
+
+class ActualObservationRow(Base):
+    """持久化的实际流量观测：滚动确认前"是否有新实际流量"的持续检查依据。
+
+    与确认行是否 active 无关——即使旧确认被新版本顶替，已录入的实际流量
+    仍然是事实水位线，不能被绕过。
+    """
+    __tablename__ = "actual_observations"
+    id = Column(String, primary_key=True)
+    scenario_id = Column(String, nullable=False, index=True)
+    step_index = Column(String, nullable=False)      # 场景绝对时段编号
+    payload = Column(Text, nullable=False)           # ActualStepIn JSON
+    created_at = Column(String, default="")
 
 
 engine = create_async_engine(DB_URL, echo=False, future=True)

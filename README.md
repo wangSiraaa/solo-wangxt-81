@@ -91,8 +91,9 @@ WEB_DIST=../frontend/dist/reservoir-frontend uvicorn app.main:app --port 8000
 ## 测试
 
 ```bash
-cd backend && pytest          # 17 项：单位、守恒、权重、缺测、洪峰、混单位；
-                              # 滚动计划：前缀固定/预测骤降归因/超计划执行/曲线修订/情景区间
+cd backend && pytest          # 22 项：单位、守恒、权重、缺测、洪峰、混单位；
+                              # 滚动：前缀固定/骤降归因/超计划/曲线修订/区间承诺绑定；
+                              # 确认水位线持久化拦截/强制确认/版本检查
 ```
 
 ## 滚动计划（第二页 `/rolling`）
@@ -117,6 +118,7 @@ cd backend && pytest          # 17 项：单位、守恒、权重、缺测、洪
 
 | 接口 | 说明 |
 |---|---|
-| `POST /api/rolling/replan` | 输入场景 + actual 前缀 + 新版 forecast + 已确认快照 + 合同参数，返回计划/账面调整/归因/区间 |
+| `POST /api/rolling/replan` | 输入场景 + actual 前缀 + 新版 forecast + 已确认快照 + 合同参数，返回计划/账面调整/归因/区间（各情景共用同一份承诺与合同） |
+| `POST /api/scenarios/{id}/actual-observations` | 上报/覆盖实际流量（按 step_index 去重），形成确认检查的持久化水位线 |
 | `GET /api/scenarios/{id}/confirmation` | 当前活跃确认版本 |
-| `POST /api/scenarios/{id}/confirm` | 确认（绑定预测版本；actual_used_count 下降时返回新实际流量告警） |
+| `POST /api/scenarios/{id}/confirm` | 确认（绑定预测版本；条数低于水位线 max(观测,历次确认) 或依据版本过期时 **409 拦截**，`force=true` 可留痕强制确认；3 条后反复提交 2 条会持续被拦） |

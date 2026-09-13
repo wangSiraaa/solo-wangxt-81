@@ -231,24 +231,85 @@ def test_curve_revaluation(base_payload):
         assert lhs == pytest.approx(row["end_storage_m3"], abs=1e-2)
 
 
-# ---------- 5) 多来水情景：缺口区间；无概率不输出精确概率 ----------
+# ---------- 5) 多来水情景：同一承诺/合同；无概率不输出精确概率 ----------
 
-def test_scenario_ranges_no_fake_probability(base_payload):
+def test_scenario_ranges_share_fixed_commitment_and_no_fake_probability(base_payload):
     m = 3
     plan = _first_plan(base_payload)
-    actual = [_actual_step(base_payload, t) for t in range(m)]
-    scenarios = [
-        ScenarioForecastIn(key="wet", name="偏丰", probability=None,
-                           steps=_future_forecast(base_payload, m, 30, scale=1.3)),
-        ScenarioForecastIn(key="dry", name="偏枯", probability=None,
-                           steps=_future_forecast(base_payload, m, 30, scale=0.3)),
-    ]
-    out = _replan(base_payload, actual, scenarios[0].steps, version="v2",
-                  confirmed=_confirmed(base_payload, plan), ranges=scenarios)
-    assert "不输出期望" in out["probability_note"] or "概率" in out["probability_note"]
-    assert len(out["ranges"]) == 2
-    dry = next(r for r in out["ranges"] if r["key"] == "dry")
-    wet = next(r for r in out["ranges"] if r["key"] == "wet")
-    assert dry["probability"] is None and wet["probability"] is None
-    # 偏枯情景农业缺口必须大于偏丰
-    assert dry["deficit_total_m3"]["agriculture"] >= wet["deficit_total_m3"]["agriculture"]
+    actual = _actual_as_planned(base_payload, plan, m)
+
+    def scenario(key, name, scale):
+        return ScenarioForecastIn(
+            key=key, name=name, probability=None,
+            steps=_future_forecast(base_payload, m, 30, scale=scale))
+
+    # 主预测即偏枯版：通知期承诺在 dry 情景下可全额兑现，wet 下也应锁定同一承诺
+    dry = scenario("dry", "偏枯", 0.25)
+    wet = scenario("wet", "偏丰", 1.3)
+    mid = scenario("mid", "基准", 0.7)
+    out = _replan(base_payload, actual, dry.steps, version="v2",
+                  confirmed=_confirmed(base_payload, plan),
+                  ranges=[wet, mid, dry])
+
+    assert "概率" in out["probability_note"]
+    keys_ = ("life", "industry", "agriculture")
+
+    # 5a) 三个情景使用同一份承诺：通知期（视界内前 2 步）欠诺=0；
+    # 承诺是下限 D+u>=C，丰水时可以供得更多，但任何情景都不能低于承诺
+    for r in out["ranges"]:
+        assert r["probability"] is None
+        nf = 30 - m
+        for t in range(nf):
+            for k in keys_:
+                committed = plan["ledger"][m + t]["delivery_m3"][k]
+                demand_t = plan["ledger"][m + t]["demand_m3"][k]
+                deficit_t = r["deficit_range_per_period_m3"][k][t]
+                supplied = demand_t - deficit_t
+                short_t = r["shortfall_range_per_period_m3"][k][t]
+                # 通知期：欠诺必须为 0；承诺量>0 时 D 被硬固定为承诺，
+                # 承诺量为 0 时不限制丰水增供
+                if t < 2:
+                    assert short_t == pytest.approx(0.0, abs=1.0)
+                    if committed > 1e-6:
+                        assert supplied == pytest.approx(committed, rel=1e-6, abs=1e3)
+                else:
+                    # 期外：供水 + 欠诺 >= 承诺
+                    assert supplied + short_t >= committed - 1e3
+                assert 0 - 1e3 <= supplied <= demand_t + 1e3
+                assert short_t <= committed + 1e3
+
+    # 5b) 通知期外，越枯欠诺/缺口越大；偏丰欠诺应为 0
+    wet_r = next(r for r in out["ranges"] if r["key"] == "wet")
+    dry_r = next(r for r in out["ranges"] if r["key"] == "dry")
+    assert sum(wet_r["shortfall_total_m3"].values()) == pytest.approx(0.0, abs=1.0)
+    assert sum(dry_r["shortfall_total_m3"].values()) > 0
+    assert dry_r["deficit_total_m3"]["agriculture"] >= wet_r["deficit_total_m3"]["agriculture"]
+    # 欠诺总量不得超过承诺总量（同一份承诺矩阵）
+    committed_total = {
+        k: sum(plan["ledger"][t]["delivery_m3"][k] for t in range(m, 30))
+        for k in keys_}
+    for r in out["ranges"]:
+        for k in keys_:
+            assert r["shortfall_total_m3"][k] <= committed_total[k] + 1e-6
+
+
+def test_scenario_ranges_use_same_notice_contract(base_payload):
+    """通知期参数不同（2 vs 0）时结果应不同，且系统始终采用确认时合同的 2。"""
+    m = 3
+    plan = _first_plan(base_payload)
+    actual = _actual_as_planned(base_payload, plan, m)
+    dry = ScenarioForecastIn(
+        key="dry", name="偏枯", probability=None,
+        steps=_future_forecast(base_payload, m, 30, scale=0.2))
+    # 即使本次请求试图把通知期缩到 0，已确认合同的 2 天通知期仍应生效
+    out = _replan(base_payload, actual, dry.steps, version="v2",
+                  confirmed=_confirmed(base_payload, plan,
+                                       contract={"notice_steps": 2,
+                                                 "down_cost_multiplier": 10,
+                                                 "emergency": False}),
+                  contract={"notice_steps": 0}, ranges=[dry])
+    assert out["contract"]["effective_notice_steps"] == 2
+    dry_r = out["ranges"][0]
+    for k in ("life", "industry", "agriculture"):
+        assert dry_r["shortfall_range_per_period_m3"][k][0] == pytest.approx(0.0, abs=1.0)
+        assert dry_r["shortfall_range_per_period_m3"][k][1] == pytest.approx(0.0, abs=1.0)

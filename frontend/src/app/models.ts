@@ -195,9 +195,28 @@ export interface ScenarioRange {
   deficit_total_m3: Record<string, number>;
   deficit_range_per_period_m3: Record<string, number[]>;
   shortfall_total_m3: Record<string, number>;
+  shortfall_range_per_period_m3?: Record<string, number[]>;
   change_cost_total: number;
   final_storage_m3: number;
   conflicts_count: number;
+}
+
+export interface ActualObservationResult {
+  scenario_id: string;
+  observed_count: number;
+  max_step_index: number | null;
+  watermark_count: number;
+}
+
+export interface ConfirmResult {
+  confirmation_id: string;
+  scenario_id: string;
+  forecast_version: string;
+  actual_used_count: number;
+  watermark_count: number;
+  blocked: boolean;
+  warning: string;
+  previously_confirmed_versions: string[];
 }
 
 export interface ReplanResult {

@@ -555,21 +555,24 @@ def replan(req, scn: ScenarioIn) -> dict:
         planned_inflow=planned_i, actual_inflow=prefix.inflow,
     )
 
-    # ---------- 多来水情景区间（不强行造概率） ----------
+    # ---------- 多来水情景区间 ----------
+    # 区间口径：承诺矩阵、通知期、欠诺单价、紧急豁免、起点、曲线全部与主计划相同，
+    # 各情景只改变未来来水。未给概率时只给区间，不输出期望/风险概率。
     ranges = []
     prob_note = ""
     if req.evaluated_scenarios:
         probs = [s.probability for s in req.evaluated_scenarios]
-        has_prob = all(p is not None for p in probs)
-        if not has_prob:
-            prob_note = ("部分或全部来水情景未给概率：只报告各情景下的缺口区间，"
+        if not all(p is not None for p in probs):
+            prob_note = ("部分或全部来水情景未给概率：只报告各情景下的缺口与欠诺代价区间，"
                          "不输出期望值或风险概率（避免给出看似精确的假概率）。")
+        elif any(p < 0 or p > 1 for p in probs) or abs(sum(probs) - 1.0) > 1e-6:
+            prob_note = ("所给概率之和不为 1：保留各情景概率原值，仅作情景标签，"
+                         "不据此做加权期望计算。")
         for scen in req.evaluated_scenarios:
             ranges.append(_evaluate_range(
-                scn, scen, old_curve if req.curve_revision is None else curve,
-                prefix, keys, demand, min_frac, names, mult, emergency,
-                current_storage, spillway, req.impute_inflow,
-                base_curve=curve))
+                scn, scen, curve, prefix, keys, demand, min_frac, names,
+                mult, emergency, current_storage, spillway, req.impute_inflow,
+                commitment=commitment, notice=eff_notice))
 
     actual_ledger = _actual_ledger_rows(prefix, keys)
     return {
@@ -684,7 +687,13 @@ def _attribute(scn, old_curve, new_curve, future_steps, keys, names, demand,
 
 def _evaluate_range(scn, scen, curve, prefix, keys, demand, min_frac, names,
                     mult, emergency, current_storage, spillway, impute,
+                    *, commitment: np.ndarray, notice: int,
                     base_curve=None) -> ScenarioRangeOut:
+    """同一方案在某来水情景下的缺口/欠诺代价。
+
+    关键：承诺矩阵 commitment 与通知期 notice 必须与主计划完全相同——
+    不同情景下变化的只有"来水"，合同规则不能随情景放松，否则区间没有可比性。
+    """
     m = prefix.length
     recs, durs, _ = build_future_steps(scn, prefix, scen.steps, impute)
     steps = StepInput(
@@ -694,31 +703,38 @@ def _evaluate_range(scn, scen, curve, prefix, keys, demand, min_frac, names,
         duration_s=sum(durs) / len(durs))
     weights = {d.key: d.weight for d in scn.demands}
     try:
-        # 情景区间评估：用软承诺（notice=0）评估该情景本身的缺口，
-        # 但保留承诺代价，回答"按这套承诺在该来水下要赔多少/缺多少"
         res = _counterfactual(curve, steps, keys, names, weights, demand, min_frac,
                               initial=current_storage,
-                              commitment=np.zeros_like(demand), notice=0, mult=mult,
+                              commitment=commitment, notice=notice, mult=mult,
                               spillway=spillway, emergency=emergency)
         deficit = {k: float(sum(res.deficit_m3[k])) for k in keys}
         per_period = {k: [float(x) for x in res.deficit_m3[k]] for k in keys}
         short = {k: float(sum(res.shortfall_m3[k])) for k in keys}
+        short_period = {k: [float(x) for x in res.shortfall_m3[k]] for k in keys}
         return ScenarioRangeOut(
             key=scen.key, name=scen.name, probability=scen.probability,
             feasible=True, deficit_total_m3=deficit,
             deficit_range_per_period_m3=per_period,
             shortfall_total_m3=short,
+            shortfall_range_per_period_m3=short_period,
             change_cost_total=res.change_cost_total,
             final_storage_m3=res.storage_m3[-1], conflicts_count=0)
     except SolveError:
+        # 连硬承诺都无法兑现：缺口按需求、欠诺按承诺量给出区间上界
+        raw_w = np.array([weights[k] for k in keys], dtype=float)
+        w_norm = raw_w / raw_w.sum()
+        cost_mat = np.tile(w_norm * mult, (demand.shape[1], 1)).T
         return ScenarioRangeOut(
             key=scen.key, name=scen.name, probability=scen.probability,
             feasible=False,
             deficit_total_m3={k: float(sum(demand[j])) for j, k in enumerate(keys)},
             deficit_range_per_period_m3={k: demand[j].tolist()
                                          for j, k in enumerate(keys)},
-            shortfall_total_m3={k: 0.0 for k in keys},
-            change_cost_total=0.0, final_storage_m3=current_storage,
+            shortfall_total_m3={k: float(sum(commitment[j])) for j, k in enumerate(keys)},
+            shortfall_range_per_period_m3={k: commitment[j].tolist()
+                                           for j, k in enumerate(keys)},
+            change_cost_total=float((cost_mat * commitment).sum()),
+            final_storage_m3=current_storage,
             conflicts_count=1)
 
 

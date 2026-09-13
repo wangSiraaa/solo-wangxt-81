@@ -41,6 +41,7 @@ export class RollingPage implements OnInit {
   busy = signal(false);
   error = signal('');
   warn = signal('');
+  forceConfirm = signal(false);
   selectedPeriod = signal<number | null>(null);
   readonly fmtWan = wan;
 
@@ -180,6 +181,14 @@ export class RollingPage implements OnInit {
     };
   }
 
+  private persistActual(actual: ActualStep[]) {
+    // 已保存场景才持久化；内置演示（无场景行）跳过，确认检查仍可在已保存场景上演示
+    if (!this.scenarioId() || !this.scenarios().some(s => s.id === this.scenarioId())) return;
+    this.api.upsertObservations(this.scenarioId(), actual).subscribe({
+      next: () => {}, error: () => {},
+    });
+  }
+
   replan() {
     this.busy.set(true); this.error.set(''); this.warn.set('');
     this.baselinePlan().then((plan: any) => {
@@ -198,6 +207,7 @@ export class RollingPage implements OnInit {
       const dryActual = this.buildActual(plan, null).map(a => ({ ...a, measured_storage: null }));
       this.api.replan(this.buildBody(plan, dryActual, forecast, null, revision)).subscribe({
         next: dry => {
+          this.persistActual(dryActual as ActualStep[]);
           if (!wantsMeasured) {
             this.finish(dry, scenarios);
             return;
@@ -205,7 +215,7 @@ export class RollingPage implements OnInit {
           const bookEndWan = dry.plan.ledger[this.m() - 1].end_storage_m3 / 1e4;
           const actual = this.buildActual(plan, bookEndWan);
           this.api.replan(this.buildBody(plan, actual, forecast, scenarios, revision)).subscribe({
-            next: r => this.finish(r, scenarios),
+            next: r => { this.persistActual(actual); this.finish(r, scenarios); },
             error: e => this.fail(e),
           });
         },
@@ -224,17 +234,33 @@ export class RollingPage implements OnInit {
     this.error.set(e?.error?.detail?.message ?? '重算失败：' + (e?.message ?? e));
   }
 
-  confirm() {
+  confirm(force = false) {
     const r = this.result();
     if (!r) return;
+    if (!force) this.warn.set('');
     this.api.confirm(this.scenarioId(), {
       scenario_id: this.scenarioId(),
       forecast_version: r.forecast_version,
       plan: r.plan, actual_used_count: r.prefix_len,
       contract: r.contract,
-    }).subscribe(res => {
-      if (res.warning) this.warn.set(res.warning);
-      this.api.confirmation(this.scenarioId()).subscribe(c => this.confirmed.set(c));
+      based_on_version: r.based_on_confirmed_version,
+      force,
+    }).subscribe({
+      next: res => {
+        this.forceConfirm.set(false);
+        if (res.warning) this.warn.set(res.warning);
+        this.api.confirmation(this.scenarioId()).subscribe(c => this.confirmed.set(c));
+      },
+      error: e => {
+        const d = e?.error?.detail;
+        if (e?.status === 409 && d?.message) {
+          // 水位线拦截：不写入确认，提示用户先重算，或显式强制确认
+          this.warn.set(d.message + '（如确认信息无误，可点"仍要确认（留痕）"）');
+          this.forceConfirm.set(true);
+        } else {
+          this.error.set(d?.message ?? '确认失败：' + (e?.message ?? e));
+        }
+      },
     });
   }
 

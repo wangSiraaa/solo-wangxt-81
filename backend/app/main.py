@@ -11,13 +11,15 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import Integer, cast, func, select, update
 
 from . import demos, rolling
 from .core.units import UnitError, supported
-from .db import (PlanConfirmationRow, SchemeRow, ScenarioRow, init_db,
-                 session)
-from .rolling_schemas import ConfirmOut, ConfirmRequest, ReplanOut, ReplanRequest
+from .db import (ActualObservationRow, PlanConfirmationRow, SchemeRow,
+                 ScenarioRow, init_db, session)
+from .rolling_schemas import (ActualObservationIn, ActualObservationOut,
+                              ConfirmOut, ConfirmRequest, ReplanOut,
+                              ReplanRequest)
 from .schemas import (CompareOut, LockOut, ScenarioIn, ScenarioMeta,
                       ScenarioOut, SolveOptions, SolveOut)
 from .services import ScenarioError, new_id, run_scenario
@@ -235,29 +237,100 @@ async def get_confirmation(sid: str):
         }
 
 
+async def _watermark(s, sid: str) -> tuple[int, int | None]:
+    """实际流量水位线 = max(已持久化观测去重条数, 历次确认实际条数)。
+
+    不依赖当前 active 确认行——即使旧确认被新版本顶替，历史确认依据的
+    实际条数与已录入观测仍持续生效。
+    """
+    obs_n = (await s.execute(
+        select(func.count(func.distinct(ActualObservationRow.step_index)))
+        .where(ActualObservationRow.scenario_id == sid)
+    )).scalar() or 0
+    max_step = (await s.execute(
+        select(func.max(ActualObservationRow.step_index))
+        .where(ActualObservationRow.scenario_id == sid)
+    )).scalar()
+    confirmed_n = (await s.execute(
+        select(func.coalesce(func.max(
+            cast(PlanConfirmationRow.actual_used_count, Integer)), 0))
+        .where(PlanConfirmationRow.scenario_id == sid)
+    )).scalar() or 0
+    return max(int(obs_n), int(confirmed_n)), (int(max_step) if max_step is not None else None)
+
+
+async def _scenario_exists(s, sid: str) -> bool:
+    return await s.get(ScenarioRow, sid) is not None
+
+
+@app.post("/api/scenarios/{sid}/actual-observations", response_model=ActualObservationOut)
+async def upsert_observations(sid: str, body: ActualObservationIn):
+    """上报/覆盖实际流量观测（按 step_index 去重），作为确认前持续检查的事实水位线。"""
+    async with session() as s:
+        if not await _scenario_exists(s, sid):
+            raise HTTPException(404, "场景不存在")
+        for step in body.steps:
+            idx = str(int(step["step_index"]))
+            existing = (await s.execute(
+                select(ActualObservationRow).where(
+                    ActualObservationRow.scenario_id == sid,
+                    ActualObservationRow.step_index == idx)
+            )).scalars().first()
+            payload = json.dumps(step, ensure_ascii=False)
+            if existing is not None:
+                existing.payload = payload
+            else:
+                s.add(ActualObservationRow(
+                    id=new_id(), scenario_id=sid, step_index=idx, payload=payload,
+                    created_at=datetime.now(timezone.utc).isoformat()))
+        wm, max_step = await _watermark(s, sid)
+        return ActualObservationOut(scenario_id=sid, observed_count=wm,
+                                    max_step_index=max_step, watermark_count=wm)
+
+
 @app.post("/api/scenarios/{sid}/confirm", response_model=ConfirmOut)
 async def confirm_plan(sid: str, req: ConfirmRequest):
-    """确认计划（与预测版本绑定）。确认前再次核对实际流量条数：
-    若库里已存在比确认依据更新的实际数据，则拒绝并提示先重算。"""
+    """确认计划（与预测版本绑定）。
+
+    确认前基于**持久化实际流量水位线**持续检查：本次依据条数低于已知水位线
+    （已录入观测或历次确认的最大值）默认 409 拦截、不写入确认；force=true
+    可强制放行并标记 forced。历史确认行一律保留，检查不会因 active 行被
+    替换而失效——3 条后提交 2 条、再次提交 2 条都会继续被拦截。
+    """
     if req.scenario_id != sid:
         raise HTTPException(422, "路径 scenario_id 与请求体不一致")
     async with session() as s:
-        scn_row = await s.get(ScenarioRow, sid)
-        if scn_row is None:
+        if not await _scenario_exists(s, sid):
             raise HTTPException(404, "场景不存在")
-        # 确认前检查是否已有更新的实际流量：以活跃确认记录的条数为参照
-        prev = (await s.execute(
-            select(PlanConfirmationRow)
-            .where(PlanConfirmationRow.scenario_id == sid,
-                   PlanConfirmationRow.active == "1")
-        )).scalars().first()
-        newer = False
-        warning = ""
-        if prev and req.actual_used_count < int(prev.actual_used_count or 0):
-            newer = True
-            warning = (f"检测到已有 {prev.actual_used_count} 条实际流量的确认，"
-                       f"本次只基于 {req.actual_used_count} 条——请确认没有漏掉新的实际流量后再确认。")
-        # 同场景旧确认置为非活跃（历史版本保留）
+
+        watermark, _ = await _watermark(s, sid)
+        prev_versions = [v for (v,) in (await s.execute(
+            select(PlanConfirmationRow.forecast_version)
+            .where(PlanConfirmationRow.scenario_id == sid)
+            .order_by(PlanConfirmationRow.created_at.desc())
+        )).all()]
+
+        parts = []
+        if req.actual_used_count < watermark:
+            parts.append(
+                f"已知 {watermark} 个时段的实际流量（持久化观测或历次确认水位线），"
+                f"本次计划只基于 {req.actual_used_count} 条——存在更新的实际流量，"
+                f"请先拉取实际数据重算后再确认。")
+        if req.based_on_version and prev_versions and req.based_on_version != prev_versions[0]:
+            parts.append(
+                f"本次依据版本 '{req.based_on_version}'，但最新确认版本是 "
+                f"'{prev_versions[0]}'——期间预测/承诺可能已再修订。")
+        warning = " ".join(parts)
+
+        if warning and not req.force:
+            raise HTTPException(409, detail={
+                "message": warning,
+                "watermark_count": watermark,
+                "actual_used_count": req.actual_used_count,
+                "previously_confirmed_versions": prev_versions,
+                "hint": "如确需在信息不全时确认，请带 force=true 强制确认（会留痕）。",
+            })
+
         await s.execute(
             update(PlanConfirmationRow)
             .where(PlanConfirmationRow.scenario_id == sid,
@@ -269,11 +342,16 @@ async def confirm_plan(sid: str, req: ConfirmRequest):
             actual_used_count=str(req.actual_used_count),
             contract=json.dumps(req.contract, ensure_ascii=False),
             plan=json.dumps(req.plan, ensure_ascii=False),
-            created_at=datetime.now(timezone.utc).isoformat(), active="1"))
-        return ConfirmOut(confirmation_id=cid, scenario_id=sid,
-                          forecast_version=req.forecast_version,
-                          actual_used_count=req.actual_used_count,
-                          newer_actual_available=newer, warning=warning)
+            created_at=datetime.now(timezone.utc).isoformat(), active="1",
+            forced="1" if warning else "0"))
+        return ConfirmOut(
+            confirmation_id=cid, scenario_id=sid,
+            forecast_version=req.forecast_version,
+            actual_used_count=req.actual_used_count,
+            watermark_count=max(watermark, req.actual_used_count),
+            blocked=False,
+            warning=("已在告警下强制确认：" + warning) if warning else "",
+            previously_confirmed_versions=prev_versions)
 
 
 # ---------- 生产态：直接托管构建后的 Angular（开发态用 ng serve + 代理）----------

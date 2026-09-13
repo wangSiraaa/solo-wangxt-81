@@ -111,9 +111,11 @@ class ScenarioRangeOut(BaseModel):
     deficit_total_m3: dict[str, float]
     deficit_range_per_period_m3: dict[str, list[float]]
     shortfall_total_m3: dict[str, float]
+    shortfall_range_per_period_m3: dict[str, list[float]] = {}
     change_cost_total: float
     final_storage_m3: float
     conflicts_count: int
+    # 明确不输出：expected_*、risk_probability 等字段不存在——无概率不做概率结论
 
 
 class ReplanOut(BaseModel):
@@ -133,12 +135,27 @@ class ReplanOut(BaseModel):
     stale_actual_warning: str = ""
 
 
+class ActualObservationIn(BaseModel):
+    """上报实际流量（用于确认前的持续检查）。step_index 相同则覆盖。"""
+    steps: list[dict[str, Any]] = Field(description="ActualStepIn 列表")
+
+
+class ActualObservationOut(BaseModel):
+    scenario_id: str
+    observed_count: int
+    max_step_index: int | None
+    watermark_count: int                 # max(观测去重条数, 历次确认条数)
+
+
 class ConfirmRequest(BaseModel):
     scenario_id: str
     forecast_version: str
     plan: dict[str, Any] = Field(description="本次重算返回的 plan（SolveOut）")
     actual_used_count: int = Field(description="确认时使用的实际流量条数")
     contract: dict[str, Any] = {}
+    based_on_version: str | None = Field(
+        None, description="本次计划所依据的已确认版本（ReplanOut.based_on_confirmed_version）")
+    force: bool = Field(False, description="已知晓有更新的实际流量，仍强制确认")
 
 
 class ConfirmOut(BaseModel):
@@ -146,5 +163,7 @@ class ConfirmOut(BaseModel):
     scenario_id: str
     forecast_version: str
     actual_used_count: int
-    newer_actual_available: bool
+    watermark_count: int
+    blocked: bool = False                # True=被拦截，未写入确认
     warning: str = ""
+    previously_confirmed_versions: list[str] = []
