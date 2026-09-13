@@ -1,0 +1,96 @@
+<div style="padding:16px 20px; max-width:1500px; margin:0 auto">
+  <div class="row" style="align-items:center; justify-content:space-between; margin-bottom:12px">
+    <h1>教学型水库水量分配模拟
+      <span class="muted small" style="font-weight:400">逐时段水量账 · LP 配水 · 库容曲线换算</span>
+    </h1>
+      <span class="disclaimer">⚠ 教学演示系统：不连接真实闸门，不替代现实供水决策</span>
+  </div>
+
+  <div class="row" style="margin-bottom:14px">
+    <div class="panel grow">
+      <h2>1. 选场景</h2>
+      <div class="row" style="align-items:center">
+        <select [value]="selectedId()" (change)="load($any($event.target).value)" style="min-width:220px">
+          <option value="" disabled>选择已保存的场景…</option>
+          <option *ngFor="let s of scenarios()" [value]="s.id">
+            {{ s.name }}{{ s.builtin ? '（内置）' : '' }}
+          </option>
+        </select>
+        <span class="muted small">或直接载入演示：</span>
+        <button (click)="loadDemo('base')">常规来水</button>
+        <button (click)="loadDemo('zero')">零来水</button>
+        <button (click)="loadDemo('flood')">洪峰超容</button>
+        <button (click)="loadDemo('mixed')">混合单位</button>
+        <button (click)="loadDemo('missing')">来水缺测</button>
+        <button *ngIf="payload() && !selectedId()" (click)="saveAsScenario()">存入场景库</button>
+      </div>
+    </div>
+
+    <div class="panel grow">
+      <h2>2. 公开权重与缺测规则（改完点"重新求解"）</h2>
+      <div class="row" style="align-items:center">
+        <ng-container *ngIf="payload() as p">
+          <label *ngFor="let d of p.demands" style="margin-right:14px">
+            {{ d.name }}
+            <input type="number" min="0" step="0.5" style="width:70px"
+                   [ngModel]="weights()[d.key]"
+                   (ngModelChange)="setWeight(d.key, +$event)">
+          </label>
+          <label>缺测来水：
+            <select [ngModel]="impute()" (ngModelChange)="impute.set($event)">
+              <option value="none">不插补（报错）</option>
+              <option value="linear">线性插补</option>
+              <option value="mean">均值插补</option>
+              <option value="zero">显式按零</option>
+            </select>
+          </label>
+          <input style="width:150px" placeholder="方案名" [ngModel]="schemeName()" (ngModelChange)="schemeName.set($event)">
+          <button class="primary" (click)="solve()" [disabled]="busy()">{{ busy() ? '求解中…' : '重新求解' }}</button>
+        </ng-container>
+      </div>
+    </div>
+  </div>
+
+  <div class="warn-box" *ngIf="error()">
+    {{ error() }}
+  </div>
+
+  <!-- 已保存方案（可锁定） -->
+  <div class="panel" *ngIf="savedSchemes().length" style="margin-bottom:14px">
+    <h2>已保存方案（🔒 锁定后参数不动，可在旁边继续调整另一个方案对比）</h2>
+    <div class="row">
+      <div *ngFor="let s of savedSchemes()" class="pill panel small"
+           [class.active]="active()?.scheme_id === s.id"
+           style="padding:8px 12px; margin-bottom:6px"
+           (click)="useScheme(s)">
+        {{ s.locked ? '🔒' : '🔓' }} <b>{{ s.name }}</b>
+        <span class="muted">
+          {{ s.result.feasible
+            ? '期末水位 ' + (s.result.level_m.at(-1) | number:'1.2-2') + 'm'
+            : '不可行(' + s.result.conflicts.length + '冲突)' }}
+        </span>
+        <button style="margin-left:8px; padding:2px 8px"
+                (click)="$event.stopPropagation(); toggleLockSaved(s)">
+          {{ s.locked ? '解锁' : '锁定' }}
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="grow" *ngIf="locked() as lk" style="flex:1 1 45%">
+      <h2 style="padding:0 4px">🔒 对照基准：{{ lk.name }}</h2>
+      <app-results-panel [result]="lk" [selected]="selectedPeriod()" (pick)="pickPeriod($event)" />
+    </div>
+    <div class="grow" *ngIf="active() as ac" [style.flex]="locked() ? '1 1 55%' : '1 1 100%'">
+      <div class="row" style="align-items:center; justify-content:space-between; padding:0 4px">
+        <h2>{{ locked() ? '🔓 正在调整的方案' : '当前方案' }}：{{ ac.name }}</h2>
+        <button *ngIf="ac.feasible && ac.scheme_id && !locked()" class="primary" (click)="lockActive()">
+          🔒 锁定此方案作为对照
+        </button>
+        <button *ngIf="locked()" (click)="unlockLocked()">取消对照</button>
+      </div>
+      <app-results-panel [result]="ac" [selected]="selectedPeriod()" (pick)="pickPeriod($event)" />
+    </div>
+  </div>
+</div>

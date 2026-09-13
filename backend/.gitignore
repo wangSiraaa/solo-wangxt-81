@@ -1,0 +1,6 @@
+# 本地无 PostgreSQL 时的零配置开发：
+#   DB_URL=sqlite+aiosqlite:///./dev.db uvicorn app.main:app --reload
+__pycache__/
+*.pyc
+*.db
+.pytest_cache/

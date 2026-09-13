@@ -1,0 +1,99 @@
+<div *ngIf="!result().feasible" class="warn-box">
+  <b>⚠ 找不到满足全部硬条件的可行方案。</b>
+  逐时段前向诊断发现 <b>{{ conflictCount() }}</b> 个冲突时段：
+  <ul>
+    <li *ngFor="let c of result().conflicts">
+      <span class="tag bad">{{ c.kind === 'flood' ? '洪峰超容' : (c.kind === 'drought' ? '干旱/生态冲突' : '期末目标冲突') }}</span>
+      <b>时段 #{{ c.index + 1 }}（{{ result().ledger[c.index]?.label }}）</b>：{{ c.message }}
+    </li>
+  </ul>
+  下方图表仍给出诊断水量路径（守恒缺口即被硬边界夹住的超额水量），可点图定位时段。
+</div>
+
+<div class="row" style="margin-bottom:12px">
+  <div class="panel grow">
+    <h2>库容与水位（点击曲线定位时段）</h2>
+    <app-chart [config]="levelChart()" />
+  </div>
+  <div class="panel grow">
+    <h2>水从哪里来 / 到哪里去（万m³）</h2>
+    <app-chart [config]="balanceChart()" />
+  </div>
+</div>
+
+<div class="row" style="margin-bottom:12px">
+  <div class="panel grow">
+    <h2>各类取水与需求缺口（深色=取水，红=缺口）</h2>
+    <app-chart [config]="deliveryChart()" />
+  </div>
+  <div class="panel" style="min-width:280px">
+    <h2>方案汇总（可逐笔核对）</h2>
+    <table>
+      <tr *ngFor="let k of demandKeys()">
+        <td class="label">
+          <span [style.color]="colorOf(k)">■</span> {{ result().demand_names[k] }}
+          <span class="muted small">(权重 {{ result().weights[k] | number:'1.2-2' }})</span>
+        </td>
+        <td>缺 {{ fmtWan(result().totals['deficit_' + k] ?? 0) }} 万m³</td>
+      </tr>
+      <tr><td class="label">总入流</td><td>{{ fmtWan(result().totals['inflow']) }} 万m³</td></tr>
+      <tr><td class="label">总蒸发</td><td>{{ fmtWan(result().totals['evaporation']) }} 万m³</td></tr>
+      <tr><td class="label">总弃水</td><td>{{ fmtWan(result().totals['spill']) }} 万m³</td></tr>
+      <tr><td class="label">期初/期末蓄水</td>
+        <td>{{ fmtWan(result().totals['initial_storage']) }} → {{ fmtWan(result().totals['final_storage']) }} 万m³</td></tr>
+      <tr><td class="label">守恒校验（每时段 |残差| &lt; 0.01 m³）</td>
+        <td><span class="tag" [class.ok]="conservationOk()" [class.bad]="!conservationOk()">
+          {{ conservationOk() ? '通过' : '未通过' }}</span></td></tr>
+      <tr *ngIf="result().imputed_inflow_indexes.length">
+        <td class="label">插补来水时段</td>
+        <td class="muted">{{ imputedLabel() }}（{{ result().impute_method }}）</td>
+      </tr>
+    </table>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>逐时段水量账（点击上方图表可高亮；每行满足 期初+入流 = 蒸发+取水+弃水+期末）</h2>
+  <div class="scroll-x">
+    <table>
+      <thead>
+      <tr>
+        <th>时段</th><th>期初</th><th>入流</th><th>蒸发</th>
+        <th *ngFor="let k of demandKeys()">{{ result().demand_names[k] }}</th>
+        <th>弃水</th><th>期末</th><th>水位(m)</th>
+        <th>生态要求/实际</th><th>守恒残差(m³)</th>
+      </tr>
+      </thead>
+      <tbody>
+      <tr *ngFor="let row of result().ledger"
+          [style.background]="selected() === row.index ? 'rgba(77,163,255,.12)' : ''"
+          (click)="pick.emit(row.index)" style="cursor:pointer">
+        <td class="label">
+          {{ row.label || '#' + (row.index + 1) }}
+          <span class="tag warn" *ngIf="row.inflow_imputed">插补</span>
+          <span class="tag bad" *ngIf="conflictAt(row.index)" [title]="conflictAt(row.index)?.message">冲突</span>
+        </td>
+        <td>{{ fmtWan(row.start_storage_m3) }}</td>
+        <td>{{ fmtWan(row.inflow_m3) }}</td>
+        <td>{{ fmtWan(row.evaporation_m3) }}</td>
+        <td *ngFor="let k of demandKeys()">
+          {{ fmtWan(row.delivery_m3[k] ?? 0) }}
+          <span class="muted" *ngIf="(row.deficit_m3[k] ?? 0) > 1">/缺{{ fmtWan(row.deficit_m3[k] ?? 0) }}</span>
+        </td>
+        <td>{{ fmtWan(row.spill_m3) }}</td>
+        <td>{{ fmtWan(row.end_storage_m3) }}</td>
+        <td>{{ fmtM(row.end_elevation_m) }}</td>
+        <td>
+          {{ fmtWan(row.eco_requirement_m3) }} / {{ fmtWan(row.eco_release_m3) }}
+          <span class="tag" [class.ok]="row.eco_ok" [class.bad]="!row.eco_ok">
+            {{ row.eco_ok ? '达标' : '不足' }}</span>
+        </td>
+        <td [class.muted]="abs(row.conservation_residual_m3) < 1e-2"
+            [style.color]="abs(row.conservation_residual_m3) >= 1e-2 ? '#f0625f' : ''">
+          {{ residual(row.conservation_residual_m3) }}
+        </td>
+      </tr>
+      </tbody>
+    </table>
+  </div>
+</div>

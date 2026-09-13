@@ -1,0 +1,25 @@
+# Local environment and credential material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+secrets/
+credentials/
+
+# Local runtime state and dependency caches
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite
+*.sqlite3
+frontend/node_modules/
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

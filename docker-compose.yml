@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: resuser
+      POSTGRES_PASSWORD: respass
+      POSTGRES_DB: reservoir
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resuser -d reservoir"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./backend
+    environment:
+      DB_URL: postgresql+asyncpg://resuser:respass@db:5432/reservoir
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    image: node:20-alpine
+    workingdir: /app
+    command: sh -c "npm install && npx ng serve --host 0.0.0.0 --port 4200"
+    ports:
+      - "4200:4200"
+    volumes:
+      - ./frontend:/app
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
