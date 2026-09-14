@@ -88,12 +88,25 @@ WEB_DIST=../frontend/dist/reservoir-frontend uvicorn app.main:app --port 8000
 - **找不到可行方案**：后端不返回模糊错误，而是给出逐时段前向诊断，
   标明首个/全部冲突时段、冲突类型和水量缺口。
 
+## 数据库与旧库迁移
+
+默认 PostgreSQL（docker-compose），本地可用 SQLite（`DB_URL=sqlite+aiosqlite:///./dev.db`）。
+
+**升级旧库**：启动时 `app/migrations.py` 先于 `create_all` 执行，幂等可重复：
+- 已存在的表缺列（如旧版 `plan_confirmations` 没有 `forced`）→
+  `ALTER TABLE ... ADD COLUMN`（带常量默认值，旧行自动回填）；
+- 整表缺失（如 `actual_observations`）→ 由 `create_all` 按最新结构新建。
+
+不依赖 `create_all` 自动改旧表（它只建缺失的表、不会加列）；新增字段时在
+`migrations._ADDITIONS` 登记一行即可。迁移可用 `tests/test_legacy_migration.py`
+（直接构造旧结构 sqlite 库）回归。
+
 ## 测试
 
 ```bash
-cd backend && pytest          # 22 项：单位、守恒、权重、缺测、洪峰、混单位；
+cd backend && pytest          # 24 项：单位、守恒、权重、缺测、洪峰、混单位；
                               # 滚动：前缀固定/骤降归因/超计划/曲线修订/区间承诺绑定；
-                              # 确认水位线持久化拦截/强制确认/版本检查
+                              # 确认水位线持久化拦截/强制确认/版本检查；旧库迁移幂等
 ```
 
 ## 滚动计划（第二页 `/rolling`）

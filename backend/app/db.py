@@ -82,6 +82,9 @@ async def session() -> AsyncSession:
 
 
 async def init_db(seed_builtins=None) -> None:
+    # 先迁移旧表（只补缺列），再建缺失的新表；两步都幂等，每次启动可重复执行
+    from .migrations import run_migrations
+    await run_migrations(engine)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     if seed_builtins:
